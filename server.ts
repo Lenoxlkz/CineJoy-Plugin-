@@ -105,7 +105,7 @@ app.get('/api/git-status', async (_req, res) => {
       clean: status.trim().length === 0,
       status: status || 'Árbol limpio',
       lastCommit: log || 'Sin commits previos',
-      remote: remote || 'https://github.com/Lenoxlkz/kino-plugin-cinejoy.git',
+      remote: remote || 'https://github.com/Lenoxlkz/CineJoy-Plugin-.git',
     });
   } catch (err: any) {
     res.json({ success: false, error: err.message });
@@ -115,12 +115,18 @@ app.get('/api/git-status', async (_req, res) => {
 // Git push endpoint
 app.post('/api/git-push', async (req, res) => {
   try {
-    const { token, message = 'Update CineJoy plugin files' } = req.body;
+    const { token, repo = 'Lenoxlkz/CineJoy-Plugin-', message = 'CineJoy v1.0.8: Raíz de Kino + Nuvio + Proxy HLS', force = true } = req.body;
     if (!token || typeof token !== 'string') {
       return res.status(400).json({ error: 'Debes proporcionar un GitHub Personal Access Token (PAT) con permisos de escritura (repo).' });
     }
 
-    // Sync files from workspace cinejoy-plugin
+    // Ensure root files are identical to cinejoy-plugin
+    fs.copyFileSync(path.join(PLUGIN_DIR, 'kino-plugin.json'), path.resolve(process.cwd(), 'kino-plugin.json'));
+    fs.copyFileSync(path.join(PLUGIN_DIR, 'plugin.js'), path.resolve(process.cwd(), 'plugin.js'));
+    fs.copyFileSync(path.join(PLUGIN_DIR, 'icon.png'), path.resolve(process.cwd(), 'icon.png'));
+    fs.copyFileSync(path.join(PLUGIN_DIR, 'kino-export.json'), path.resolve(process.cwd(), 'kino-export.json'));
+
+    // Sync files inside cinejoy-plugin repository
     await execAsync('cd cinejoy-plugin && git add .');
     try {
       await execAsync(`cd cinejoy-plugin && git commit -m "${message.replace(/"/g, '\\"')}"`);
@@ -128,12 +134,14 @@ app.post('/api/git-push', async (req, res) => {
       // Nothing to commit is fine
     }
 
-    const pushUrl = `https://${token.trim()}@github.com/Lenoxlkz/kino-plugin-cinejoy.git`;
-    const { stdout, stderr } = await execAsync(`cd cinejoy-plugin && git push -u "${pushUrl}" main`);
+    const cleanRepo = repo.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
+    const pushUrl = `https://${token.trim()}@github.com/${cleanRepo}.git`;
+    const forceFlag = force ? ' --force' : '';
+    const { stdout, stderr } = await execAsync(`cd cinejoy-plugin && git push -u "${pushUrl}" main${forceFlag}`);
 
     res.json({
       success: true,
-      message: 'Archivos enviados exitosamente a GitHub (Lenoxlkz/kino-plugin-cinejoy)!',
+      message: `Archivos enviados exitosamente a la raíz de GitHub (${cleanRepo})!`,
       output: (stdout || stderr || 'Push completado exitosamente').replace(new RegExp(token.trim(), 'g'), '***'),
     });
   } catch (err: any) {

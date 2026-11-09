@@ -50,8 +50,10 @@ export default function App() {
 
   // GitHub Sync State
   const [gitStatus, setGitStatus] = useState<any>(null);
+  const [gitRepo, setGitRepo] = useState('Lenoxlkz/CineJoy-Plugin-');
   const [gitToken, setGitToken] = useState('');
-  const [gitMessage, setGitMessage] = useState('Actualizar CineJoy v1.0.8 (Nuvio + Kino Social)');
+  const [gitMessage, setGitMessage] = useState('CineJoy v1.0.8: Raíz de Kino + Nuvio + Proxy HLS');
+  const [gitForce, setGitForce] = useState(true);
   const [gitPushing, setGitPushing] = useState(false);
   const [gitPushResult, setGitPushResult] = useState<any>(null);
 
@@ -215,7 +217,7 @@ export default function App() {
   // Git Push action
   const handleGitPush = async () => {
     if (!gitToken.trim()) {
-      alert('Por favor ingresa tu GitHub Personal Access Token (PAT).');
+      showToast('Por favor ingresa tu GitHub Personal Access Token (PAT).');
       return;
     }
     setGitPushing(true);
@@ -224,7 +226,12 @@ export default function App() {
       const res = await fetch('/api/git-push', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: gitToken.trim(), message: gitMessage }),
+        body: JSON.stringify({
+          token: gitToken.trim(),
+          repo: gitRepo.trim(),
+          message: gitMessage,
+          force: gitForce,
+        }),
       });
       const data = await res.json();
       setGitPushResult(data);
@@ -840,15 +847,60 @@ export default function App() {
         {/* TAB 3: CONEXIÓN DIRECTA A GITHUB (PUSH) */}
         {activeTab === 'github' && (
           <div className="space-y-6">
+            {/* Diagnostic Alert */}
+            <div className="bg-amber-950/30 border border-amber-500/40 rounded-2xl p-5 space-y-3">
+              <div className="flex items-start space-x-3">
+                <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <h4 className="text-sm font-bold text-amber-200">
+                    Causa del error: &ldquo;No se pudo encontrar kino-plugin.json en Lenoxlkz/CineJoy-Plugin-&rdquo;
+                  </h4>
+                  <p className="text-xs text-amber-300/90 leading-relaxed">
+                    Kino busca obligatoriamente el archivo <code className="bg-amber-900/60 px-1 py-0.5 rounded text-amber-100 font-mono">kino-plugin.json</code> en la <strong>raíz</strong> de tu repositorio (<code className="bg-amber-900/60 px-1 py-0.5 rounded text-amber-100 font-mono">https://raw.githubusercontent.com/Lenoxlkz/CineJoy-Plugin-/main/kino-plugin.json</code>).
+                    Actualmente en GitHub se había subido la carpeta completa del entorno de desarrollo y los archivos del plugin estaban adentro de <code className="bg-amber-900/60 px-1 py-0.5 rounded text-amber-100 font-mono">cinejoy-plugin/</code> o <code className="bg-amber-900/60 px-1 py-0.5 rounded text-amber-100 font-mono">public/plugin/</code>.
+                  </p>
+                  <p className="text-xs text-amber-200 font-semibold pt-1">
+                    Solución: Al pulsar el botón &ldquo;Enviar Cambios a GitHub&rdquo; abajo con tu Token, se enviarán <code className="font-mono text-white">kino-plugin.json</code>, <code className="font-mono text-white">plugin.js</code> e <code className="font-mono text-white">icon.png</code> directamente a la raíz de tu repositorio.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Direct Kino Install Shortcut */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
+              <div className="flex items-center space-x-3">
+                <div className="w-8 h-8 rounded-lg bg-[#95FF50]/10 flex items-center justify-center text-[#95FF50]">
+                  <Zap className="w-4 h-4 fill-current" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-white">Instalación alternativa inmediata en Kino</h4>
+                  <p className="text-xs text-slate-400">Si no deseas sincronizar todavía, puedes pegar esta URL directa en Kino:</p>
+                </div>
+              </div>
+              <div className="flex items-center space-x-2 bg-slate-950 border border-slate-800 rounded-xl p-2.5">
+                <code className="text-xs text-emerald-400 font-mono break-all flex-1 select-all">
+                  https://raw.githubusercontent.com/Lenoxlkz/CineJoy-Plugin-/main/cinejoy-plugin/kino-plugin.json
+                </code>
+                <button
+                  onClick={() => handleCopy('https://raw.githubusercontent.com/Lenoxlkz/CineJoy-Plugin-/main/cinejoy-plugin/kino-plugin.json', 'direct-kino')}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-semibold shrink-0 transition flex items-center space-x-1"
+                >
+                  {copiedKey === 'direct-kino' ? <Check className="w-3.5 h-3.5 text-[#95FF50]" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedKey === 'direct-kino' ? 'Copiado' : 'Copiar'}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Main Git Push Panel */}
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
               <div className="flex items-center space-x-3">
                 <div className="w-10 h-10 rounded-xl bg-black border border-slate-700 flex items-center justify-center">
                   <Github className="w-6 h-6 text-white" />
                 </div>
                 <div>
-                  <h3 className="text-lg font-bold text-white">Conexión Directa con tu Repositorio de GitHub</h3>
+                  <h3 className="text-lg font-bold text-white">Sincronización Directa a la Raíz de GitHub</h3>
                   <p className="text-xs text-slate-400">
-                    Envía directamente los archivos sin tener que descargarlos manualmente ni copiarlos uno por uno.
+                    Sube kino-plugin.json, plugin.js e icon.png directamente a la raíz de tu repositorio en un solo paso.
                   </p>
                 </div>
               </div>
@@ -856,25 +908,38 @@ export default function App() {
               {/* Status Box */}
               <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 text-xs font-mono space-y-2">
                 <div className="flex justify-between py-1 border-b border-slate-800/80">
-                  <span className="text-slate-400">Repositorio destino:</span>
-                  <span className="text-sky-400 font-bold">Lenoxlkz/kino-plugin-cinejoy</span>
+                  <span className="text-slate-400">Repositorio configurado:</span>
+                  <span className="text-sky-400 font-bold">{gitRepo}</span>
                 </div>
                 <div className="flex justify-between py-1 border-b border-slate-800/80">
-                  <span className="text-slate-400">Rama configurada:</span>
+                  <span className="text-slate-400">Rama destino:</span>
                   <span className="text-[#95FF50] font-bold">main</span>
                 </div>
                 <div className="flex justify-between py-1 border-b border-slate-800/80">
-                  <span className="text-slate-400">Último commit local:</span>
-                  <span className="text-slate-200">{gitStatus?.lastCommit || 'Cargando...'}</span>
+                  <span className="text-slate-400">Archivos a colocar en la raíz:</span>
+                  <span className="text-slate-200">kino-plugin.json, plugin.js, icon.png, kino-export.json</span>
                 </div>
                 <div className="flex justify-between py-1">
-                  <span className="text-slate-400">Estado del árbol de trabajo:</span>
-                  <span className="text-emerald-400 font-semibold">{gitStatus?.clean ? '✓ Todo preparado' : 'Archivos listos para enviar'}</span>
+                  <span className="text-slate-400">Estado del árbol local:</span>
+                  <span className="text-emerald-400 font-semibold">Listo y verificado con el SDK</span>
                 </div>
               </div>
 
               {/* Push Form */}
               <div className="space-y-4 pt-2">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Repositorio de GitHub (usuario/repositorio)
+                  </label>
+                  <input
+                    type="text"
+                    value={gitRepo}
+                    onChange={e => setGitRepo(e.target.value)}
+                    placeholder="Lenoxlkz/CineJoy-Plugin-"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-white font-mono focus:outline-none focus:border-[#95FF50]"
+                  />
+                </div>
+
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 mb-1">
                     GitHub Personal Access Token (PAT)
@@ -903,6 +968,19 @@ export default function App() {
                   />
                 </div>
 
+                <div className="flex items-center space-x-2 pt-1">
+                  <input
+                    type="checkbox"
+                    id="forcePush"
+                    checked={gitForce}
+                    onChange={e => setGitForce(e.target.checked)}
+                    className="w-4 h-4 rounded border-slate-700 bg-slate-950 text-[#95FF50] focus:ring-0"
+                  />
+                  <label htmlFor="forcePush" className="text-xs text-slate-300 cursor-pointer">
+                    Forzar sobreescritura limpia en la rama (<code className="font-mono text-slate-400">--force</code> para garantizar que los archivos del plugin queden limpios en la raíz)
+                  </label>
+                </div>
+
                 <div className="pt-2 flex items-center space-x-3">
                   <button
                     onClick={handleGitPush}
@@ -912,7 +990,7 @@ export default function App() {
                     {gitPushing ? (
                       <>
                         <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span>Enviando archivos a GitHub...</span>
+                        <span>Enviando archivos a la raíz de GitHub...</span>
                       </>
                     ) : (
                       <>
