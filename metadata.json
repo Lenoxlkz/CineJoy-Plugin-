@@ -1,0 +1,6 @@
+{
+  "name": "CineJoy & Nuvio Plugin Studio",
+  "description": "Suite de desarrollo, validación y pruebas para el plugin CineJoy de Kino con integración de scrapers Nuvio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

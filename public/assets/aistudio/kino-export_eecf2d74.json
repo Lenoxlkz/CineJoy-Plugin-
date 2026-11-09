@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "exportedAt": "2026-11-09T12:30:42.975Z",
+  "pluginId": "cinejoy",
+  "name": "CineJoy",
+  "version": "1.0.6",
+  "originalAddress": "Lenoxlkz\/kino-plugin-cinejoy",
+  "kinoVersion": "0.9.83",
+  "files": {
+    "icon.png": "303500963db56f212f03222e9e988eb51e1cdce91928a41479a1778acdf76cbf",
+    "kino-plugin.json": "35232b14b895e57a2bcc9c179efe88a9a936ff80208253467aef004196c4619f",
+    "plugin.js": "a1043e080e91d23a14ea791ce9c2e6510da442156e07be2fed3e037cc8c1c87d"
+  }
+}

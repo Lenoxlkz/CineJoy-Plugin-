@@ -1,0 +1,79 @@
+{
+  "NuvioPlugin/All-in-One-Nuvio": {
+    "available": [
+      {
+        "id": "cine-es",
+        "name": "CineLatino",
+        "description": "Películas y series en español",
+        "types": [
+          "movie",
+          "tv"
+        ],
+        "languages": [
+          "es"
+        ],
+        "compatible": true
+      },
+      {
+        "id": "stream-fast",
+        "name": "StreamFast",
+        "description": "Enlaces rápidos HD",
+        "types": [
+          "movie",
+          "tv"
+        ],
+        "languages": [
+          "en",
+          "es"
+        ],
+        "compatible": true
+      },
+      {
+        "id": "anime-sub",
+        "name": "AnimeSub",
+        "description": "Anime subtitulado",
+        "types": [
+          "movie",
+          "tv"
+        ],
+        "languages": [
+          "es",
+          "ja"
+        ],
+        "compatible": true
+      },
+      {
+        "id": "torrent-only",
+        "name": "TorrentsOnly",
+        "description": "Solo torrents",
+        "types": [
+          "movie"
+        ],
+        "languages": [
+          "es"
+        ],
+        "compatible": false
+      }
+    ],
+    "streams": {
+      "cine-es": {
+        "movie:550": {
+          "url": "https://cdn.example.com/cinejoy/fightclub-1080p.m3u8",
+          "mime": "application/x-mpegURL",
+          "label": "1080p Español Latino"
+        },
+        "series:1399:1:1": {
+          "url": "https://cdn.example.com/cinejoy/got-s01e01.m3u8",
+          "label": "1080p Latino"
+        }
+      },
+      "stream-fast": {
+        "movie:550": {
+          "url": "https://cdn.example.com/cinejoy/fightclub-720p.mp4",
+          "mime": "video/mp4",
+          "label": "720p Directo"
+        }
+      }
+    }
+  }
+}
