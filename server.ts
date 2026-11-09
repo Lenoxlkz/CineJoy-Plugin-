@@ -94,6 +94,93 @@ app.post('/api/test-offline', async (_req, res) => {
   }
 });
 
+// Git status endpoint
+app.get('/api/git-status', async (_req, res) => {
+  try {
+    const { stdout: status } = await execAsync('cd cinejoy-plugin && git status -s');
+    const { stdout: log } = await execAsync('cd cinejoy-plugin && git log -1 --pretty=format:"%h - %s (%ci)"');
+    const { stdout: remote } = await execAsync('cd cinejoy-plugin && git remote -v');
+    res.json({
+      success: true,
+      clean: status.trim().length === 0,
+      status: status || 'Árbol limpio',
+      lastCommit: log || 'Sin commits previos',
+      remote: remote || 'https://github.com/Lenoxlkz/kino-plugin-cinejoy.git',
+    });
+  } catch (err: any) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
+// Git push endpoint
+app.post('/api/git-push', async (req, res) => {
+  try {
+    const { token, message = 'Update CineJoy plugin files' } = req.body;
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ error: 'Debes proporcionar un GitHub Personal Access Token (PAT) con permisos de escritura (repo).' });
+    }
+
+    // Sync files from workspace cinejoy-plugin
+    await execAsync('cd cinejoy-plugin && git add .');
+    try {
+      await execAsync(`cd cinejoy-plugin && git commit -m "${message.replace(/"/g, '\\"')}"`);
+    } catch {
+      // Nothing to commit is fine
+    }
+
+    const pushUrl = `https://${token.trim()}@github.com/Lenoxlkz/kino-plugin-cinejoy.git`;
+    const { stdout, stderr } = await execAsync(`cd cinejoy-plugin && git push -u "${pushUrl}" main`);
+
+    res.json({
+      success: true,
+      message: 'Archivos enviados exitosamente a GitHub (Lenoxlkz/kino-plugin-cinejoy)!',
+      output: (stdout || stderr || 'Push completado exitosamente').replace(new RegExp(token.trim(), 'g'), '***'),
+    });
+  } catch (err: any) {
+    const cleanMsg = (err.stderr || err.message || '').replace(new RegExp(req.body?.token || '', 'g'), '***');
+    res.status(500).json({ success: false, error: cleanMsg });
+  }
+});
+
+// Screen tree preview endpoint
+app.post('/api/screen-tree', async (req, res) => {
+  try {
+    const { device = 'tv', tab = 'trending' } = req.body;
+    const cmd = `node sdk/run.mjs --device ${device} --state '{"tab":"${tab}"}' cinejoy-plugin screen`;
+    const { stdout } = await execAsync(cmd);
+
+    // Extract JSON starting at first {
+    const jsonStart = stdout.indexOf('{');
+    if (jsonStart !== -1) {
+      const jsonStr = stdout.slice(jsonStart);
+      const parsed = JSON.parse(jsonStr);
+      return res.json({ success: true, tree: parsed });
+    }
+    res.json({ success: false, raw: stdout });
+  } catch (err: any) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
+// Screen event simulation endpoint
+app.post('/api/screen-event', async (req, res) => {
+  try {
+    const { name = 'changeTab', arg = 'trending', state = {} } = req.body;
+    const stateStr = JSON.stringify(state);
+    const cmd = `node sdk/run.mjs --state '${stateStr}' cinejoy-plugin screenEvent ${name} ${arg}`;
+    const { stdout } = await execAsync(cmd);
+
+    const jsonStart = stdout.indexOf('{');
+    if (jsonStart !== -1) {
+      const parsed = JSON.parse(stdout.slice(jsonStart));
+      return res.json({ success: true, answer: parsed });
+    }
+    res.json({ success: true, answer: {}, raw: stdout });
+  } catch (err: any) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
 async function startServer() {
   const vite = await createViteServer({
     server: { middlewareMode: true },
