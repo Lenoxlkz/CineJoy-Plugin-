@@ -3,6 +3,7 @@ import { createServer as createViteServer } from 'vite';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
+import http from 'http';
 import path from 'path';
 
 const execFileAsync = promisify(execFile);
@@ -253,14 +254,19 @@ app.post('/api/screen-event', async (req, res) => {
 });
 
 async function startServer() {
+  const httpServer = http.createServer(app);
   const vite = await createViteServer({
-    server: { middlewareMode: true },
+    server: {
+      middlewareMode: true,
+      ws: { server: httpServer },
+      hmr: false,
+    },
     appType: 'spa',
   });
 
   app.use(vite.middlewares);
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`CineJoy & Nuvio workbench running on http://0.0.0.0:${PORT}`);
   });
 }

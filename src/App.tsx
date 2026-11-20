@@ -379,7 +379,7 @@ export default function App() {
               <div className="flex flex-wrap items-center gap-1.5">
                 <h1 className="text-lg font-bold text-white tracking-tight whitespace-nowrap">CineJoy TV Studio</h1>
                 <span className="bg-[#95FF50]/20 text-[#95FF50] border border-[#95FF50]/30 text-xs px-2 py-0.5 rounded-full font-mono font-semibold whitespace-nowrap">
-                  v1.0.8
+                  v1.0.9
                 </span>
                 <span className="bg-sky-500/20 text-sky-400 border border-sky-500/30 text-xs px-2 py-0.5 rounded-full font-mono whitespace-nowrap">
                   + Nuvio
