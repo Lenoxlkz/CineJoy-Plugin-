@@ -1,17 +1,41 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: '10mb' }));
 
 const PLUGIN_DIR = path.resolve(process.cwd(), 'cinejoy-plugin');
+const ALLOWED_SDK_FUNCS = new Set(['resolve', 'home', 'search', 'episodes', 'screen']);
+const ALLOWED_DEVICES = new Set(['tv', 'phone']);
+const ALLOWED_TABS = new Set(['trending', 'movies', 'series', 'action']);
+const ALLOWED_TRIGGERS = new Set(['tap', 'change', 'submit']);
+
+function combineOutput(stdout = '', stderr = ''): string {
+  const out = stdout.trim();
+  const err = stderr.trim();
+  if (err && out) return `${err}\n\n${out}`;
+  return out || err || '';
+}
+
+function resolveFixturePath(fixture: unknown): string | null {
+  if (typeof fixture !== 'string' || !fixture.trim()) return null;
+  const root = process.cwd();
+  const resolved = path.resolve(root, fixture.trim());
+  if (!resolved.startsWith(root + path.sep)) {
+    throw new Error('Ruta de fixture no permitida.');
+  }
+  if (!fs.existsSync(resolved)) {
+    throw new Error(`No se encontró el archivo fixture: ${fixture.trim()}`);
+  }
+  return fixture.trim();
+}
 
 // Endpoint to get plugin files
 app.get('/api/plugin-files', (_req, res) => {
@@ -59,26 +83,74 @@ app.post('/api/save-file', (req, res) => {
 // Endpoint to run sdk/validate.mjs
 app.post('/api/validate', async (_req, res) => {
   try {
-    const { stdout, stderr } = await execAsync('node sdk/validate.mjs cinejoy-plugin');
-    res.json({ success: true, output: stdout || stderr, rawOutput: stdout });
+    const { stdout, stderr } = await execFileAsync('node', ['sdk/validate.mjs', 'cinejoy-plugin'], {
+      timeout: 25000,
+    });
+    const combined = combineOutput(stdout, stderr);
+    res.json({ success: true, output: combined, rawOutput: combined });
   } catch (err: any) {
-    res.json({ success: false, output: err.stdout || err.stderr || err.message, error: err.message });
+    res.json({
+      success: false,
+      output: combineOutput(err.stdout, err.stderr) || err.message,
+      error: err.message,
+    });
   }
 });
 
 // Endpoint to run sdk/run.mjs
 app.post('/api/run', async (req, res) => {
+  const func = typeof req.body?.func === 'string' ? req.body.func.trim() : 'resolve';
+  const arg = typeof req.body?.arg === 'string' ? req.body.arg.trim() : '';
+
+  if (!ALLOWED_SDK_FUNCS.has(func)) {
+    return res.status(400).json({
+      success: false,
+      command: `node sdk/run.mjs cinejoy-plugin ${func}`,
+      output: `Función no permitida: ${func}`,
+      error: 'Función no permitida',
+    });
+  }
+
+  let safeFixture: string | null = null;
   try {
-    const { func = 'resolve', arg = 'movie:550', fixture = 'fixtures/nuvio-test.json' } = req.body;
-    const envPrefix = fixture ? `KINO_NUVIO_FIXTURE=${fixture} ` : '';
-    const cmd = `${envPrefix}node sdk/run.mjs cinejoy-plugin ${func} ${arg}`;
-    const { stdout, stderr } = await execAsync(cmd);
-    res.json({ success: true, command: cmd, output: stdout || stderr });
+    safeFixture = resolveFixturePath(req.body?.fixture);
+  } catch (err: any) {
+    return res.status(400).json({
+      success: false,
+      command: `node sdk/run.mjs cinejoy-plugin ${func}`,
+      output: err.message,
+      error: err.message,
+    });
+  }
+
+  const args = ['sdk/run.mjs', 'cinejoy-plugin', func];
+  if (arg && func !== 'home' && func !== 'screen') {
+    args.push(arg);
+  }
+
+  const env = { ...process.env };
+  if (safeFixture) {
+    env.KINO_NUVIO_FIXTURE = safeFixture;
+  } else {
+    delete env.KINO_NUVIO_FIXTURE;
+  }
+
+  const displayCmd = `${safeFixture ? `KINO_NUVIO_FIXTURE=${safeFixture} ` : ''}node ${args.map(a => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`;
+
+  try {
+    const { stdout, stderr } = await execFileAsync('node', args, { env, timeout: 25000 });
+    res.json({
+      success: true,
+      command: displayCmd,
+      output: combineOutput(stdout, stderr),
+      stdout,
+      stderr,
+    });
   } catch (err: any) {
     res.json({
       success: false,
-      command: req.body?.cmd || 'node sdk/run.mjs',
-      output: err.stdout || err.stderr || err.message,
+      command: displayCmd,
+      output: combineOutput(err.stdout, err.stderr) || err.message,
       error: err.message,
     });
   }
@@ -87,105 +159,96 @@ app.post('/api/run', async (req, res) => {
 // Endpoint to run node --test test/plugin.test.mjs
 app.post('/api/test-offline', async (_req, res) => {
   try {
-    const { stdout, stderr } = await execAsync('node --test test/plugin.test.mjs');
-    res.json({ success: true, output: stdout || stderr });
-  } catch (err: any) {
-    res.json({ success: false, output: err.stdout || err.stderr || err.message, error: err.message });
-  }
-});
-
-// Git status endpoint
-app.get('/api/git-status', async (_req, res) => {
-  try {
-    const { stdout: status } = await execAsync('cd cinejoy-plugin && git status -s');
-    const { stdout: log } = await execAsync('cd cinejoy-plugin && git log -1 --pretty=format:"%h - %s (%ci)"');
-    const { stdout: remote } = await execAsync('cd cinejoy-plugin && git remote -v');
-    res.json({
-      success: true,
-      clean: status.trim().length === 0,
-      status: status || 'Árbol limpio',
-      lastCommit: log || 'Sin commits previos',
-      remote: remote || 'https://github.com/Lenoxlkz/CineJoy-Plugin-.git',
+    const { stdout, stderr } = await execFileAsync('node', ['--test', 'test/plugin.test.mjs'], {
+      timeout: 25000,
     });
+    res.json({ success: true, output: combineOutput(stdout, stderr) });
   } catch (err: any) {
-    res.json({ success: false, error: err.message });
-  }
-});
-
-// Git push endpoint
-app.post('/api/git-push', async (req, res) => {
-  try {
-    const { token, repo = 'Lenoxlkz/CineJoy-Plugin-', message = 'CineJoy v1.0.8: Raíz de Kino + Nuvio + Proxy HLS', force = true } = req.body;
-    if (!token || typeof token !== 'string') {
-      return res.status(400).json({ error: 'Debes proporcionar un GitHub Personal Access Token (PAT) con permisos de escritura (repo).' });
-    }
-
-    // Ensure root files are identical to cinejoy-plugin
-    fs.copyFileSync(path.join(PLUGIN_DIR, 'kino-plugin.json'), path.resolve(process.cwd(), 'kino-plugin.json'));
-    fs.copyFileSync(path.join(PLUGIN_DIR, 'plugin.js'), path.resolve(process.cwd(), 'plugin.js'));
-    fs.copyFileSync(path.join(PLUGIN_DIR, 'icon.png'), path.resolve(process.cwd(), 'icon.png'));
-    fs.copyFileSync(path.join(PLUGIN_DIR, 'kino-export.json'), path.resolve(process.cwd(), 'kino-export.json'));
-
-    // Sync files inside cinejoy-plugin repository
-    await execAsync('cd cinejoy-plugin && git add .');
-    try {
-      await execAsync(`cd cinejoy-plugin && git commit -m "${message.replace(/"/g, '\\"')}"`);
-    } catch {
-      // Nothing to commit is fine
-    }
-
-    const cleanRepo = repo.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
-    const pushUrl = `https://${token.trim()}@github.com/${cleanRepo}.git`;
-    const forceFlag = force ? ' --force' : '';
-    const { stdout, stderr } = await execAsync(`cd cinejoy-plugin && git push -u "${pushUrl}" main${forceFlag}`);
-
     res.json({
-      success: true,
-      message: `Archivos enviados exitosamente a la raíz de GitHub (${cleanRepo})!`,
-      output: (stdout || stderr || 'Push completado exitosamente').replace(new RegExp(token.trim(), 'g'), '***'),
+      success: false,
+      output: combineOutput(err.stdout, err.stderr) || err.message,
+      error: err.message,
     });
-  } catch (err: any) {
-    const cleanMsg = (err.stderr || err.message || '').replace(new RegExp(req.body?.token || '', 'g'), '***');
-    res.status(500).json({ success: false, error: cleanMsg });
   }
 });
 
 // Screen tree preview endpoint
 app.post('/api/screen-tree', async (req, res) => {
   try {
-    const { device = 'tv', tab = 'trending' } = req.body;
-    const cmd = `node sdk/run.mjs --device ${device} --state '{"tab":"${tab}"}' cinejoy-plugin screen`;
-    const { stdout } = await execAsync(cmd);
+    const device = ALLOWED_DEVICES.has(req.body?.device) ? req.body.device : 'tv';
+    const tab = ALLOWED_TABS.has(req.body?.tab) ? req.body.tab : 'trending';
+    const args = [
+      'sdk/run.mjs',
+      '--device',
+      device,
+      '--state',
+      JSON.stringify({ tab }),
+      'cinejoy-plugin',
+      'screen',
+    ];
+    const { stdout, stderr } = await execFileAsync('node', args, { timeout: 25000 });
 
-    // Extract JSON starting at first {
     const jsonStart = stdout.indexOf('{');
     if (jsonStart !== -1) {
-      const jsonStr = stdout.slice(jsonStart);
-      const parsed = JSON.parse(jsonStr);
-      return res.json({ success: true, tree: parsed });
+      const parsed = JSON.parse(stdout.slice(jsonStart));
+      return res.json({ success: true, tree: parsed, logs: stderr || '' });
     }
-    res.json({ success: false, raw: stdout });
+    res.json({ success: false, raw: stdout, error: stderr || 'No se recibió árbol de pantalla válido.' });
   } catch (err: any) {
-    res.json({ success: false, error: err.message });
+    res.json({
+      success: false,
+      error: combineOutput(err.stdout, err.stderr) || err.message,
+    });
   }
 });
 
 // Screen event simulation endpoint
 app.post('/api/screen-event', async (req, res) => {
   try {
-    const { name = 'changeTab', arg = 'trending', state = {} } = req.body;
-    const stateStr = JSON.stringify(state);
-    const cmd = `node sdk/run.mjs --state '${stateStr}' cinejoy-plugin screenEvent ${name} ${arg}`;
-    const { stdout } = await execAsync(cmd);
+    const name = typeof req.body?.name === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(req.body.name)
+      ? req.body.name
+      : 'changeTab';
+    const arg = req.body?.arg === undefined || req.body?.arg === null ? '' : String(req.body.arg);
+    const state = req.body?.state && typeof req.body.state === 'object' && !Array.isArray(req.body.state)
+      ? req.body.state
+      : {};
+    const device = ALLOWED_DEVICES.has(req.body?.device) ? req.body.device : 'tv';
+    const trigger = ALLOWED_TRIGGERS.has(req.body?.trigger) ? req.body.trigger : 'tap';
+
+    const args = [
+      'sdk/run.mjs',
+      '--device',
+      device,
+      '--state',
+      JSON.stringify(state),
+    ];
+
+    if (req.body?.context && typeof req.body.context === 'object' && !Array.isArray(req.body.context)) {
+      args.push('--context', JSON.stringify(req.body.context));
+    }
+
+    args.push('cinejoy-plugin', 'screenEvent', name);
+    if (arg !== '' || req.body?.value !== undefined) {
+      args.push(arg);
+    }
+    if (req.body?.value !== undefined) {
+      args.push(JSON.stringify(req.body.value));
+    }
+    args.push('--trigger', trigger);
+
+    const { stdout, stderr } = await execFileAsync('node', args, { timeout: 25000 });
 
     const jsonStart = stdout.indexOf('{');
     if (jsonStart !== -1) {
       const parsed = JSON.parse(stdout.slice(jsonStart));
-      return res.json({ success: true, answer: parsed });
+      return res.json({ success: true, answer: parsed, logs: stderr || '' });
     }
-    res.json({ success: true, answer: {}, raw: stdout });
+    res.json({ success: true, answer: {}, raw: stdout, logs: stderr || '' });
   } catch (err: any) {
-    res.json({ success: false, error: err.message });
+    res.json({
+      success: false,
+      error: combineOutput(err.stdout, err.stderr) || err.message,
+    });
   }
 });
 

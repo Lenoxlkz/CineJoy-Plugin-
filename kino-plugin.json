@@ -1,7 +1,7 @@
 {
   "id": "cinejoy",
   "name": "CineJoy",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "apiVersion": 20,
   "entry": "plugin.js",
   "description": "Películas y series en alta calidad de Cinejoy, con portada y estrenos",
@@ -13,7 +13,9 @@
     "cinejoy.pk",
     "cinejoy.to",
     "api.wing.st",
+    "api2.wing.st",
     "lists.wing.st",
+    "subs2.wing.st",
     "streamdata.vaplayer.ru",
     "brightpathsignals.com",
     "cinejoyproxy.lenoxlkzsdy.workers.dev"
@@ -44,24 +46,24 @@
           "label": "Automático (Mejor disponible)"
         },
         {
-          "value": "Lisbon",
-          "label": "Lisbon (4K Ultra HD)"
+          "value": "Light",
+          "label": "Light (4K Ultra HD + Subtítulos)"
         },
         {
-          "value": "secret",
-          "label": "Secret (4K Ultra HD)"
+          "value": "Sirius",
+          "label": "Sirius (4K Ultra HD)"
+        },
+        {
+          "value": "Paris",
+          "label": "Paris (HD · Películas)"
+        },
+        {
+          "value": "Polaris",
+          "label": "Polaris (1080p Full HD)"
         },
         {
           "value": "Nebula",
-          "label": "Nebula (1080p Full HD)"
-        },
-        {
-          "value": "Solara",
-          "label": "Solara (1080p Rápido)"
-        },
-        {
-          "value": "Athens",
-          "label": "Athens (Estable)"
+          "label": "Nebula (1080p)"
         }
       ],
       "default": "auto",
@@ -72,7 +74,7 @@
       "label": "Proxy HLS (ExoPlayer Fix)",
       "type": "toggle",
       "default": true,
-      "hint": "Reescribe cabeceras text/html a video/mp2t para evitar errores en Android"
+      "hint": "Corrige cabeceras MIME y Referer para reproducir HLS sin errores en Android"
     },
     {
       "key": "quality",

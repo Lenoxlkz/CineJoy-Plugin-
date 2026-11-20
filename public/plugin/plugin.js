@@ -167,6 +167,124 @@ async function episodes(arg) {
     seasons: seasonsList
   };
 }
+const WING_SERVERS_URL = "https://api2.wing.st/servers";
+const WING_GATE_URL = "https://api2.wing.st/g";
+const WING_PROTOCOL = "lumen-gate-v2";
+const WING_SERVER_PUB_HEX = "045c88a0ae33c683a4872590b04b22f4774a4fe1c6ecf74785c74a919a71207ca94f9e6b5a7854c3aa3b44ee46bc444fea694b9f23bcd80f864ecbef48c1ef6e14";
+const WING_SERVER_PRIORITY = ["Light", "Sirius", "Paris", "Polaris", "Rigel", "Munich", "Warsaw", "Nebula"];
+const CINEJOY_REFERER = "https://cinejoy.pk/";
+const CINEJOY_ORIGIN = "https://cinejoy.pk";
+const WING_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+function toZeroPaddedHex(n) {
+  return n.toString(16).padStart(2, "0");
+}
+
+function getPublicRawHex(publicKey) {
+  if (publicKey?.raw) {
+    return kino.crypto.convert(publicKey.raw, "base64", "hex");
+  }
+  if (publicKey?.jwk?.x && publicKey?.jwk?.y) {
+    const xHex = kino.crypto.convert(publicKey.jwk.x, "base64", "hex");
+    const yHex = kino.crypto.convert(publicKey.jwk.y, "base64", "hex");
+    return "04" + xHex + yHex;
+  }
+  throw new Error("Missing ephemeral EC public key");
+}
+
+async function queryWingGate(fetchFn, serverPubKey, path, payload) {
+  const kp = kino.crypto.generateKeyPair({ type: "ec", namedCurve: "P-256" });
+  const ephPubHex = getPublicRawHex(kp.publicKey);
+  const sharedHex = kino.crypto.deriveSharedSecret({
+    privateKey: kp.privateKey,
+    publicKey: serverPubKey,
+    outputEncoding: "hex"
+  });
+
+  const prkHex = kino.crypto.hmac("sha256", ephPubHex, sharedHex, {
+    keyEncoding: "hex",
+    inputEncoding: "hex",
+    outputEncoding: "hex"
+  });
+
+  const c2sInfoHex = kino.crypto.convert(`${WING_PROTOCOL}|c2s`, "utf8", "hex") + "01";
+  const s2cInfoHex = kino.crypto.convert(`${WING_PROTOCOL}|s2c`, "utf8", "hex") + "01";
+  const reqKeyHex = kino.crypto.hmac("sha256", prkHex, c2sInfoHex, {
+    keyEncoding: "hex",
+    inputEncoding: "hex",
+    outputEncoding: "hex"
+  });
+  const resKeyHex = kino.crypto.hmac("sha256", prkHex, s2cInfoHex, {
+    keyEncoding: "hex",
+    inputEncoding: "hex",
+    outputEncoding: "hex"
+  });
+
+  const ivHex = kino.crypto.randomBytes(12, "hex");
+  const protoHex = kino.crypto.convert(WING_PROTOCOL, "utf8", "hex");
+  const reqAadHex = protoHex + "000102" + ephPubHex;
+  const ptJson = JSON.stringify({ path, payload });
+
+  const ctAndTagHex = kino.crypto.encrypt("aes-256-gcm", {
+    key: reqKeyHex,
+    keyEncoding: "hex",
+    iv: ivHex,
+    ivEncoding: "hex",
+    aad: reqAadHex,
+    aadEncoding: "hex",
+    data: ptJson,
+    inputEncoding: "utf8",
+    outputEncoding: "hex"
+  });
+
+  const wireHex = toZeroPaddedHex(2) + toZeroPaddedHex(2) + ephPubHex + ivHex + ctAndTagHex;
+  const wireBase64 = kino.crypto.convert(wireHex, "hex", "base64");
+
+  const res = await fetchFn(WING_GATE_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Origin": CINEJOY_ORIGIN,
+      "Referer": CINEJOY_REFERER,
+      "User-Agent": WING_UA
+    },
+    body: { base64: wireBase64 },
+    timeoutMs: 8000
+  });
+
+  if (!res.ok) {
+    return { ok: false, httpStatus: res.status };
+  }
+
+  const respB64 = typeof res.base64 === "function" ? await res.base64() : null;
+  if (!respB64) {
+    return { ok: false, httpStatus: res.status };
+  }
+
+  const respHex = kino.crypto.convert(respB64, "base64", "hex");
+  if (respHex.length < 56) {
+    return { ok: false, httpStatus: res.status };
+  }
+
+  const respIvHex = respHex.slice(0, 24);
+  const respCtTagHex = respHex.slice(24);
+  const resAadHex = protoHex + "000202" + ephPubHex;
+
+  const decrypted = kino.crypto.decrypt("aes-256-gcm", {
+    key: resKeyHex,
+    keyEncoding: "hex",
+    iv: respIvHex,
+    ivEncoding: "hex",
+    aad: resAadHex,
+    aadEncoding: "hex",
+    data: respCtTagHex,
+    inputEncoding: "hex",
+    outputEncoding: "utf8"
+  });
+
+  return { ok: true, httpStatus: res.status, json: JSON.parse(decrypted) };
+}
+
 async function resolve(arg, options = {}) {
   await (typeof kino !== "undefined" && typeof kino.sleep === "function" ? kino.sleep(1) : Promise.resolve());
   const ref = typeof arg === "string" ? arg : arg?.ref || "";
@@ -180,6 +298,8 @@ async function resolve(arg, options = {}) {
   const episode = parts[3] || "1";
   const isMovie = kind === "movie";
   let mediaTitle = "CineJoy Media";
+  let rawTitle = "";
+  let yearStr = "";
   let imdbId = null;
   try {
     const details = await tmdbFetch(`/${isMovie ? "movie" : "tv"}/${id}`, {
@@ -187,6 +307,9 @@ async function resolve(arg, options = {}) {
     });
     if (details) {
       mediaTitle = details.title || details.name || "CineJoy Media";
+      rawTitle = details.original_title || details.original_name || details.title || details.name || "";
+      const dateStr = details.release_date || details.first_air_date || "";
+      yearStr = dateStr ? dateStr.slice(0, 4) : "";
       if (!isMovie) {
         mediaTitle += ` - T${season}:E${episode}`;
       }
@@ -194,14 +317,18 @@ async function resolve(arg, options = {}) {
     }
   } catch (e) {
   }
+
   const fetchFn = typeof kino !== "undefined" && kino.fetch ? kino.fetch : globalThis.fetch;
   let streams = [];
-  let resolverHeaders = {};
+  const collectedSubtitles = [];
+  const seenUrls = /* @__PURE__ */ new Set();
+  const seenSubs = /* @__PURE__ */ new Set();
   let resolverHasNoSource = false;
+
   const parseDirectStream = (entry) => {
     const item = typeof entry === "string" ? { url: entry } : entry;
     if (!item || typeof item !== "object") return null;
-    const url = item.url || item.stream_url || item.src || item.file || item.master_m3u8;
+    const url = item.url || item.playlist || item.stream_url || item.src || item.file || item.master_m3u8;
     if (typeof url !== "string") return null;
     let parsed;
     try {
@@ -210,9 +337,9 @@ async function resolve(arg, options = {}) {
       return null;
     }
     if (parsed.protocol !== "https:" || !parsed.hostname) return null;
-    const declaredMime = String(item.mime || item.mime_type || item.content_type || "").toLowerCase();
+    const declaredMime = String(item.mime || item.mime_type || item.content_type || item.type || "").toLowerCase();
     const path = parsed.pathname.toLowerCase();
-    const isHls = path.endsWith(".m3u8") || declaredMime.includes("mpegurl") || declaredMime.includes("vnd.apple.mpegurl");
+    const isHls = path.endsWith(".m3u8") || declaredMime === "hls" || declaredMime.includes("mpegurl") || declaredMime.includes("vnd.apple.mpegurl");
     const isMp4 = !isHls && (path.endsWith(".mp4") || declaredMime.startsWith("video/mp4"));
     if (!isHls && !isMp4) return null;
     return {
@@ -221,68 +348,170 @@ async function resolve(arg, options = {}) {
       // identifies the playlist from its URL and content (per the Stream contract).
       ...isMp4 ? { mime: "video/mp4" } : {},
       label: typeof item.label === "string" ? item.label : typeof item.server === "string" ? item.server : void 0,
-      headers: {
-        ...resolverHeaders,
-        ...item.headers && typeof item.headers === "object" && !Array.isArray(item.headers) ? item.headers : {}
-      }
+      headers: item.headers && typeof item.headers === "object" && !Array.isArray(item.headers) ? item.headers : {}
     };
   };
+
   const resolverLog = (...args) => {
     if (typeof kino !== "undefined" && typeof kino.log === "function") kino.log(...args);
   };
-  if (imdbId) {
-    const params = new URLSearchParams({ imdb: imdbId, type: isMovie ? "movie" : "tv" });
-    if (!isMovie) {
-      params.set("season", season);
-      params.set("episode", episode);
-    }
-    const apiEndpoint = `https://streamdata.vaplayer.ru/api.php?${params.toString()}`;
-    for (let attempt = 1; attempt <= 2 && !streams.length; attempt++) {
-      resolverHeaders = {};
-      try {
-        const res = await fetchFn(apiEndpoint, {
-          headers: {
-            "Accept": "application/json",
-            "User-Agent": "CineJoy-Kino-Plugin/1.0"
-          }
-        });
-        if (res.ok) {
-          const json = await res.json();
-          const rawHeaders = json?.data?.headers ?? json?.data?.stream_headers ?? json?.headers;
-          resolverHeaders = rawHeaders && typeof rawHeaders === "object" && !Array.isArray(rawHeaders) ? rawHeaders : {};
-          const statusCode = String(json?.status_code ?? json?.status ?? "");
-          const entries = json?.data?.stream_urls ?? json?.stream_urls;
-          const rawCount = Array.isArray(entries) ? entries.length : 0;
-          const resolverStatus = statusCode.toLowerCase();
-          if (statusCode === "404" || resolverStatus === "not_found" || resolverStatus === "no_source") {
-            resolverHasNoSource = true;
-            resolverLog(`CineJoy resolver: attempt=${attempt}; http=${res.status}; api_status=${statusCode}; raw=${rawCount}; direct=0`);
-            break;
-          }
-          if ((statusCode === "200" || resolverStatus === "success") && Array.isArray(entries)) {
-            const seen = /* @__PURE__ */ new Set();
-            streams = entries.map(parseDirectStream).filter((stream) => {
-              if (!stream || seen.has(stream.url)) return false;
-              seen.add(stream.url);
-              return true;
-            }).slice(0, 9);
-          }
-          resolverLog(`CineJoy resolver: attempt=${attempt}; http=${res.status}; api_status=${statusCode || "missing"}; raw=${rawCount}; direct=${streams.length}`);
-        } else {
-          resolverLog(`CineJoy resolver: attempt=${attempt}; http=${res.status}; direct=0`);
+
+  // Resolver directo de CineJoy (api2.wing.st lumen-gate-v2)
+  if (typeof kino !== "undefined" && kino.crypto && typeof kino.crypto.generateKeyPair === "function") {
+    let availableServers = [];
+    try {
+      const srvRes = await fetchFn(WING_SERVERS_URL, {
+        headers: {
+          "Accept": "application/json",
+          "Origin": CINEJOY_ORIGIN,
+          "Referer": CINEJOY_REFERER,
+          "User-Agent": WING_UA
+        },
+        timeoutMs: 4000
+      });
+      if (srvRes.ok) {
+        const srvJson = await srvRes.json();
+        const rawList = Array.isArray(srvJson) ? srvJson : srvJson?.servers;
+        if (Array.isArray(rawList)) {
+          availableServers = rawList
+            .filter((s) => s && s.status === "ok" && typeof s.name === "string" && s.name)
+            .map((s) => s.name);
         }
-      } catch (e) {
-        const code = typeof e?.code === "string" && /^[A-Za-z0-9_-]{1,32}$/.test(e.code) ? e.code : "request_failed";
-        resolverLog(`CineJoy resolver: attempt=${attempt}; network=${code}; direct=0`);
       }
-      if (!streams.length && attempt === 1) {
-        await (typeof kino !== "undefined" && typeof kino.sleep === "function" ? kino.sleep(250) : Promise.resolve());
+    } catch (_) {
+    }
+
+    if (!availableServers.length) {
+      availableServers = [...WING_SERVER_PRIORITY];
+    }
+
+    const orderedServers = [
+      ...WING_SERVER_PRIORITY.filter((name) => availableServers.includes(name)),
+      ...availableServers.filter((name) => !WING_SERVER_PRIORITY.includes(name))
+    ].filter((name) => isMovie || name !== "Paris");
+
+    const preferredServer = String(
+      options?.server || (typeof kino !== "undefined" ? kino?.settings?.server : "") || "auto"
+    ).trim();
+    if (preferredServer && preferredServer.toLowerCase() !== "auto") {
+      const matchIdx = orderedServers.findIndex((n) => n.toLowerCase() === preferredServer.toLowerCase());
+      if (matchIdx > 0) {
+        const [chosen] = orderedServers.splice(matchIdx, 1);
+        orderedServers.unshift(chosen);
       }
+    }
+
+    const wingPayload = isMovie
+      ? {
+          tmdb: String(id),
+          ...(imdbId ? { imdb: imdbId } : {}),
+          ...(yearStr ? { year: yearStr } : {}),
+          ...(rawTitle ? { title: rawTitle } : {})
+        }
+      : {
+          tmdb: String(id),
+          season: String(season),
+          episode: String(episode),
+          ...(imdbId ? { imdb: imdbId } : {}),
+          ...(yearStr ? { year: yearStr } : {}),
+          ...(rawTitle ? { title: rawTitle } : {})
+        };
+
+    const wingPathSuffix = isMovie ? "movie" : "series";
+
+    try {
+      const serverPubKey = kino.crypto.importKey({
+        format: "raw",
+        type: "ec",
+        namedCurve: "P-256",
+        key: kino.crypto.convert(WING_SERVER_PUB_HEX, "hex", "base64")
+      });
+
+      let server404Count = 0;
+      let serverErrorCount = 0;
+
+      const queryBatch = async (batchNames) => {
+        const results = await Promise.allSettled(
+          batchNames.map(async (srvName) => {
+            const ans = await queryWingGate(fetchFn, serverPubKey, `/${srvName}/${wingPathSuffix}`, wingPayload);
+            return { srvName, ans };
+          })
+        );
+
+        for (const r of results) {
+          if (r.status !== "fulfilled") {
+            serverErrorCount++;
+            continue;
+          }
+          const { srvName, ans } = r.value;
+          if (!ans?.ok) {
+            serverErrorCount++;
+            continue;
+          }
+          const apiStatus = Number(ans.json?.status ?? ans.json?.data?.status ?? 0);
+          const list = ans.json?.data?.stream;
+          if (apiStatus === 404 || ans.json?.data?.error === "Not Found") {
+            server404Count++;
+            continue;
+          }
+          if (Array.isArray(list) && list.length > 0) {
+            for (const entry of list) {
+              const streamUrl = entry?.playlist || entry?.url;
+              const parsed = parseDirectStream({
+                url: streamUrl,
+                type: entry?.type || "hls",
+                server: `CineJoy · ${srvName}`,
+                headers: {
+                  "Referer": CINEJOY_REFERER,
+                  "Origin": CINEJOY_ORIGIN
+                }
+              });
+              if (parsed && !seenUrls.has(parsed.url)) {
+                seenUrls.add(parsed.url);
+                streams.push(parsed);
+              }
+              if (Array.isArray(entry?.captions)) {
+                for (const cap of entry.captions) {
+                  if (cap && typeof cap.url === "string" && cap.url.startsWith("https://") && !seenSubs.has(cap.url)) {
+                    seenSubs.add(cap.url);
+                    const capLang = String(cap.id || cap.language || "und").slice(0, 16).toLowerCase();
+                    const capFmt = String(cap.type || "").toLowerCase() === "srt" ? "srt" : "vtt";
+                    collectedSubtitles.push({
+                      lang: capLang || "und",
+                      url: cap.url,
+                      format: capFmt
+                    });
+                  }
+                }
+              }
+            }
+          } else if (apiStatus >= 500) {
+            serverErrorCount++;
+          }
+        }
+      };
+
+      const firstBatch = orderedServers.slice(0, 4);
+      const secondBatch = orderedServers.slice(4, 8);
+      if (firstBatch.length > 0) {
+        await queryBatch(firstBatch);
+      }
+      if (streams.length < 2 && secondBatch.length > 0) {
+        await queryBatch(secondBatch);
+      }
+
+      if (!streams.length && server404Count > 0 && serverErrorCount === 0) {
+        resolverHasNoSource = true;
+      }
+      resolverLog(`CineJoy resolver: servers=${orderedServers.length}; direct=${streams.length}; not_found=${server404Count}; errors=${serverErrorCount}`);
+    } catch (gateErr) {
+      resolverLog(`CineJoy resolver: error=${gateErr?.message || "gate_failed"}; direct=0`);
     }
   } else {
-    resolverLog("CineJoy resolver: skipped; reason=no_imdb_id");
+    resolverLog("CineJoy resolver: skipped; reason=no_kino_crypto");
   }
-  // Integración con scrapers de Nuvio (Kino 0.9.71+, apiVersion 11+)
+
+  // Integraci\xF3n con scrapers de Nuvio (Kino 0.9.71+, apiVersion 11+)
   const NUVIO_REPO = "NuvioPlugin/All-in-One-Nuvio";
   const MAX_NUVIO_SCRAPERS = 5;
   if (typeof kino !== "undefined" && typeof kino.nuvio === "object") {
@@ -297,7 +526,7 @@ async function resolve(arg, options = {}) {
         } catch (_) {}
 
         const reqType = isMovie ? "movie" : "tv";
-        const compatible = offered.filter(o => o.compatible !== false && Array.isArray(o.types) && o.types.includes(reqType));
+        const compatible = offered.filter((o) => o.compatible !== false && Array.isArray(o.types) && o.types.includes(reqType));
 
         compatible.sort((a, b) => {
           const aRem = remembered.indexOf(a.id) !== -1 ? 1 : 0;
@@ -308,7 +537,7 @@ async function resolve(arg, options = {}) {
           return bEs - aEs;
         });
 
-        const scraperIds = compatible.slice(0, MAX_NUVIO_SCRAPERS).map(o => o.id);
+        const scraperIds = compatible.slice(0, MAX_NUVIO_SCRAPERS).map((o) => o.id);
         if (scraperIds.length > 0) {
           await kino.nuvio.use({ repo: NUVIO_REPO, scrapers: scraperIds });
 
@@ -333,8 +562,9 @@ async function resolve(arg, options = {}) {
               const allCopies = [res.stream].concat(res.stream.alternatives || []);
               for (const c of allCopies) {
                 const parsed = parseDirectStream(c);
-                if (parsed) {
-                  parsed.label = res.scraper.name + (parsed.label ? " · " + parsed.label : "");
+                if (parsed && !seenUrls.has(parsed.url)) {
+                  seenUrls.add(parsed.url);
+                  parsed.label = res.scraper.name + (parsed.label ? " \xB7 " + parsed.label : "");
                   streams.push(parsed);
                 }
               }
@@ -358,45 +588,87 @@ async function resolve(arg, options = {}) {
     const userMessage = resolverHasNoSource ? "CineJoy no tiene una fuente disponible para este t\xEDtulo." : "Los servidores de video no est\xE1n disponibles en este momento. Intenta m\xE1s tarde.";
     throw typeof kino !== "undefined" && kino.error ? kino.error(errorCode, detail, { userMessage }) : Object.assign(new Error(detail), { code: errorCode });
   }
+
   const streamHeaders = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": WING_UA
   };
   const PROXY_BASE = "https://cinejoyproxy.lenoxlkzsdy.workers.dev";
   const proxyEnabled = options?.hls_proxy !== false && (typeof kino === "undefined" || kino?.settings?.hls_proxy !== false);
+  const PROXY_HOSTS = [
+    "lightspeed.st",
+    "ferb.st",
+    "vrodaz.com",
+    "cursed.st",
+    "ttcdn-us.com",
+    "bright67.online",
+    "remoteconsultinggroup",
+    "highperformancebrands",
+    "vaplayer",
+    "brightpathsignals"
+  ];
   const shouldProxy = (urlStr) => {
     if (!proxyEnabled || !urlStr || typeof urlStr !== "string") return false;
     try {
-      const h = new URL(urlStr).hostname;
-      return h.includes("remoteconsultinggroup") || h.includes("highperformancebrands") || h.includes("vaplayer") || h.includes("brightpathsignals");
+      const h = new URL(urlStr).hostname.toLowerCase();
+      return PROXY_HOSTS.some((pattern) => h === pattern || h.endsWith("." + pattern) || h.includes(pattern));
     } catch (e) {
       return false;
     }
   };
-  const wrapUrl = (urlStr) => shouldProxy(urlStr) ? `${PROXY_BASE}/?url=${encodeURIComponent(urlStr)}` : urlStr;
+  const wrapUrl = (urlStr, customReferer, pathHint = "playlist.m3u8") => {
+    if (!shouldProxy(urlStr)) return urlStr;
+    const refParam = customReferer ? `&ref=${encodeURIComponent(customReferer)}` : "";
+    return `${PROXY_BASE}/${pathHint}?url=${encodeURIComponent(urlStr)}${refParam}`;
+  };
+
   const primary = streams[0];
   const hasResolverHeaders = streams.some((stream) => Object.keys(stream.headers).length > 0);
-  const alternatives = streams.slice(1, 9).map((stream, idx) => ({
-    url: wrapUrl(stream.url),
-    ...stream.mime ? { mime: stream.mime } : {},
-    label: stream.label || `Servidor alternativo ${idx + 1}`,
-    headers: { ...streamHeaders, ...stream.headers }
-  }));
+  const alternatives = streams.slice(1, 9).map((stream, idx) => {
+    const refHdr = stream.headers?.Referer || stream.headers?.referer || "";
+    const proxied = shouldProxy(stream.url);
+    return {
+      url: wrapUrl(stream.url, refHdr, stream.mime === "video/mp4" ? "seg.mp4" : "playlist.m3u8"),
+      ...stream.mime ? { mime: stream.mime } : {},
+      label: stream.label || `Servidor alternativo ${idx + 1}`,
+      headers: proxied ? { ...streamHeaders } : { ...streamHeaders, ...stream.headers }
+    };
+  });
+
+  const subPref = String(options?.lang || (typeof kino !== "undefined" ? kino?.settings?.lang : "") || "es").toLowerCase();
+  const formattedSubtitles = subPref === "none"
+    ? []
+    : collectedSubtitles
+        .map((sub) => ({
+          lang: sub.lang,
+          url: wrapUrl(sub.url, CINEJOY_REFERER, sub.format === "srt" ? "sub.srt" : "sub.vtt"),
+          format: sub.format
+        }))
+        .sort((a, b) => {
+          const aMatch = a.lang.startsWith(subPref) ? 1 : 0;
+          const bMatch = b.lang.startsWith(subPref) ? 1 : 0;
+          return bMatch - aMatch;
+        })
+        .slice(0, 12);
+
   if (typeof kino !== "undefined" && typeof kino.log === "function") {
     const hosts = [...new Set(streams.map((stream) => new URL(stream.url).hostname))];
     const headerNames = new Set(Object.keys(streamHeaders));
-    for (const name of Object.keys(resolverHeaders)) headerNames.add(name);
     for (const stream of streams) for (const name of Object.keys(stream.headers)) headerNames.add(name);
     const fallback = hasResolverHeaders ? "user-agent+resolver-headers" : "user-agent-only";
     kino.log(`CineJoy resolve: streams=${streams.length}; distinct_hosts=${hosts.length}; hosts=${hosts.join(",")}; headers=${[...headerNames].join(",")}; alternatives=${fallback}; proxied=${shouldProxy(primary.url)}`);
   }
+
+  const primaryRef = primary.headers?.Referer || primary.headers?.referer || "";
+  const primaryProxied = shouldProxy(primary.url);
+
   return {
-    url: wrapUrl(primary.url),
+    url: wrapUrl(primary.url, primaryRef, primary.mime === "video/mp4" ? "seg.mp4" : "playlist.m3u8"),
     ...primary.mime ? { mime: primary.mime } : {},
     label: primary.label || "Servidor principal (Ultra HD)",
     title: mediaTitle,
-    headers: { ...streamHeaders, ...primary.headers },
+    headers: primaryProxied ? { ...streamHeaders } : { ...streamHeaders, ...primary.headers },
     alternatives,
-    subtitles: []
+    subtitles: formattedSubtitles
   };
 }
 

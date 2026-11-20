@@ -28,6 +28,8 @@ test('manifest adheres to Kino and Nuvio specifications', () => {
   assert.ok(manifest.capabilities.includes('screen'), 'Must declare screen capability');
   assert.ok(manifest.capabilities.includes('download'), 'Must declare download capability');
   assert.equal(manifest.streamHosts, 'any');
+  assert.ok(manifest.hosts.includes('api2.wing.st'), 'Must declare api2.wing.st host');
+  assert.ok(manifest.hosts.includes('cinejoyproxy.lenoxlkzsdy.workers.dev'), 'Must declare proxy host');
   assert.ok(Array.isArray(manifest.nuvioRepos) && manifest.nuvioRepos.length >= 1, 'Must have nuvioRepos');
   assert.ok(manifest.recommends.includes('kinotvapp/kino-social'), 'Must recommend kino-social');
   assert.ok(manifest.consumes?.social?.calls?.includes('share'), 'Must consume social.share');
@@ -53,7 +55,7 @@ test('screenEvent handles openShare and returns popup open UI', async () => {
 
 test('screenEvent handles sendShare and handles provider_missing cleanly', async () => {
   const plugin = await import(join(root, 'plugin.js'));
-  // Fake kino with plugins.call throwing provider_missing
+  const prevKino = globalThis.kino;
   globalThis.kino = {
     plugins: {
       call: async () => {
@@ -63,11 +65,130 @@ test('screenEvent handles sendShare and handles provider_missing cleanly', async
       }
     }
   };
-  const res = await plugin.screenEvent({
-    name: 'sendShare',
-    value: { shareText: 'Prueba compartir' },
-    installed: {}
-  });
-  assert.equal(res.go?.installPlugin?.repo, 'kinotvapp/kino-social');
-  assert.ok(res.toast);
+  try {
+    const res = await plugin.screenEvent({
+      name: 'sendShare',
+      value: { shareText: 'Prueba compartir' },
+      installed: {}
+    });
+    assert.equal(res.go?.installPlugin?.repo, 'kinotvapp/kino-social');
+    assert.ok(res.toast);
+  } finally {
+    globalThis.kino = prevKino;
+  }
 });
+
+test('resolve queries api2.wing.st lumen-gate-v2 via kino.crypto and proxies ExoPlayer-incompatible CDNs', async () => {
+  const plugin = await import(join(root, 'plugin.js'));
+  const prevKino = globalThis.kino;
+  const crypto = await import('node:crypto');
+
+  const capturedPaths = [];
+  let savedEphPub = null;
+  let savedResKey = null;
+
+  globalThis.kino = {
+    lang: 'es-MX',
+    settings: { hls_proxy: true, server: 'auto', lang: 'es' },
+    sleep: async () => {},
+    log: () => {},
+    error: (code, msg, extra) => Object.assign(new Error(msg), { code, ...extra }),
+    crypto: {
+      importKey: ({ key }) => ({ raw: key }),
+      generateKeyPair: () => {
+        const ephPub = Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 0x11)]).toString('base64');
+        return { privateKey: { handle: 'test' }, publicKey: { raw: ephPub } };
+      },
+      deriveSharedSecret: () => Buffer.alloc(32, 0x22).toString('hex'),
+      hmac: (_alg, key, data, p) => {
+        const kBuf = Buffer.from(key, p.keyEncoding || 'utf8');
+        const dBuf = Buffer.from(data, p.inputEncoding || 'utf8');
+        return crypto.createHmac('sha256', kBuf).update(dBuf).digest(p.outputEncoding || 'hex');
+      },
+      randomBytes: (n, enc) => Buffer.alloc(n, 0x33).toString(enc),
+      convert: (data, from, to) => Buffer.from(data, from).toString(to),
+      encrypt: (_alg, p) => {
+        const pt = JSON.parse(p.data);
+        capturedPaths.push(pt.path);
+        const ephPub = Buffer.from(p.aad, 'hex').subarray(-65);
+        savedEphPub = ephPub;
+        const shared = Buffer.alloc(32, 0x22);
+        const prk = crypto.createHmac('sha256', ephPub).update(shared).digest();
+        savedResKey = crypto.createHmac('sha256', prk).update(Buffer.concat([Buffer.from('lumen-gate-v2|s2c'), Buffer.from([1])])).digest();
+        const c = crypto.createCipheriv('aes-256-gcm', Buffer.from(p.key, 'hex'), Buffer.from(p.iv, 'hex'));
+        c.setAAD(Buffer.from(p.aad, 'hex'));
+        return Buffer.concat([c.update(p.data, 'utf8'), c.final(), c.getAuthTag()]).toString('hex');
+      },
+      decrypt: (_alg, p) => {
+        const buf = Buffer.from(p.data, 'hex');
+        const d = crypto.createDecipheriv('aes-256-gcm', Buffer.from(p.key, 'hex'), Buffer.from(p.iv, 'hex'));
+        d.setAAD(Buffer.from(p.aad, 'hex'));
+        d.setAuthTag(buf.subarray(buf.length - 16));
+        return Buffer.concat([d.update(buf.subarray(0, buf.length - 16)), d.final()]).toString('utf8');
+      }
+    },
+    fetch: async (url) => {
+      if (url.includes('api.themoviedb.org')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            title: 'Pelicula Prueba',
+            original_title: 'Test Movie',
+            release_date: '2025-01-01',
+            external_ids: { imdb_id: 'tt1234567' }
+          })
+        };
+      }
+      if (url === 'https://api2.wing.st/servers') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ servers: [{ name: 'Light', status: 'ok' }, { name: 'Paris', status: 'ok' }] })
+        };
+      }
+      if (url === 'https://api2.wing.st/g') {
+        const lastPath = capturedPaths[capturedPaths.length - 1];
+        const bodyObj = lastPath.startsWith('/Light/')
+          ? {
+              data: {
+                stream: [{
+                  type: 'hls',
+                  id: 'primary',
+                  playlist: 'https://lightspeed.st/hls/test/master.m3u8',
+                  captions: [{ type: 'vtt', id: 'es', url: 'https://lightspeed.st/hls/test/es.vtt' }]
+                }]
+              },
+              status: 200
+            }
+          : { data: { error: 'Not Found' }, status: 404 };
+        const iv = Buffer.alloc(12, 0x44);
+        const aad = Buffer.concat([Buffer.from('lumen-gate-v2'), Buffer.from([0, 2, 2]), savedEphPub]);
+        const c = crypto.createCipheriv('aes-256-gcm', savedResKey, iv);
+        c.setAAD(aad);
+        const pt = Buffer.from(JSON.stringify(bodyObj), 'utf8');
+        const resp = Buffer.concat([iv, c.update(pt), c.final(), c.getAuthTag()]);
+        return {
+          ok: true,
+          status: 200,
+          base64: async () => resp.toString('base64')
+        };
+      }
+      return { ok: false, status: 404 };
+    }
+  };
+
+  try {
+    const out = await plugin.resolve('movie:1561834');
+    assert.ok(capturedPaths.includes('/Light/movie'));
+    assert.ok(capturedPaths.includes('/Paris/movie'));
+    assert.equal(out.label, 'CineJoy · Light');
+    assert.match(out.url, /^https:\/\/cinejoyproxy\.lenoxlkzsdy\.workers\.dev\/playlist\.m3u8\?url=https%3A%2F%2Flightspeed\.st%2Fhls%2Ftest%2Fmaster\.m3u8&ref=https%3A%2F%2Fcinejoy\.pk%2F$/);
+    assert.equal(out.subtitles.length, 1);
+    assert.equal(out.subtitles[0].lang, 'es');
+    assert.match(out.subtitles[0].url, /\/sub\.vtt\?url=/);
+  } finally {
+    globalThis.kino = prevKino;
+  }
+});
+
