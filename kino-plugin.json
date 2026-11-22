@@ -1,7 +1,7 @@
 {
   "id": "cinejoy",
   "name": "CineJoy",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "apiVersion": 20,
   "entry": "plugin.js",
   "description": "Películas y series en alta calidad de Cinejoy, con portada y estrenos",
@@ -16,8 +16,6 @@
     "api2.wing.st",
     "lists.wing.st",
     "subs2.wing.st",
-    "streamdata.vaplayer.ru",
-    "brightpathsignals.com",
     "cinejoyproxy.lenoxlkzsdy.workers.dev"
   ],
   "streamHosts": "any",
@@ -54,16 +52,16 @@
           "label": "Sirius (4K Ultra HD)"
         },
         {
+          "value": "Nebula",
+          "label": "Nebula (1080p)"
+        },
+        {
           "value": "Paris",
           "label": "Paris (HD · Películas)"
         },
         {
           "value": "Polaris",
           "label": "Polaris (1080p Full HD)"
-        },
-        {
-          "value": "Nebula",
-          "label": "Nebula (1080p)"
         }
       ],
       "default": "auto",

@@ -171,7 +171,7 @@ const WING_SERVERS_URL = "https://api2.wing.st/servers";
 const WING_GATE_URL = "https://api2.wing.st/g";
 const WING_PROTOCOL = "lumen-gate-v2";
 const WING_SERVER_PUB_HEX = "045c88a0ae33c683a4872590b04b22f4774a4fe1c6ecf74785c74a919a71207ca94f9e6b5a7854c3aa3b44ee46bc444fea694b9f23bcd80f864ecbef48c1ef6e14";
-const WING_SERVER_PRIORITY = ["Light", "Sirius", "Paris", "Polaris", "Rigel", "Munich", "Warsaw", "Nebula"];
+const WING_SERVER_PRIORITY = ["Light", "Sirius", "Nebula", "Paris", "Polaris", "Rigel", "Munich", "Warsaw"];
 const CINEJOY_REFERER = "https://cinejoy.pk/";
 const CINEJOY_ORIGIN = "https://cinejoy.pk";
 const WING_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -192,7 +192,7 @@ function getPublicRawHex(publicKey) {
   throw new Error("Missing ephemeral EC public key");
 }
 
-async function queryWingGate(fetchFn, serverPubKey, path, payload) {
+async function queryWingGate(fetchFn, serverPubKey, path, payload, timeoutMs = 8000) {
   const kp = kino.crypto.generateKeyPair({ type: "ec", namedCurve: "P-256" });
   const ephPubHex = getPublicRawHex(kp.publicKey);
   const sharedHex = kino.crypto.deriveSharedSecret({
@@ -249,7 +249,7 @@ async function queryWingGate(fetchFn, serverPubKey, path, payload) {
       "User-Agent": WING_UA
     },
     body: { base64: wireBase64 },
-    timeoutMs: 8000
+    timeoutMs
   });
 
   if (!res.ok) {
@@ -287,9 +287,19 @@ async function queryWingGate(fetchFn, serverPubKey, path, payload) {
 
 async function resolve(arg, options = {}) {
   await (typeof kino !== "undefined" && typeof kino.sleep === "function" ? kino.sleep(1) : Promise.resolve());
-  const ref = typeof arg === "string" ? arg : arg?.ref || "";
-  if (!ref) {
+  const rawRef = typeof arg === "string" ? arg : arg?.ref || "";
+  if (!rawRef) {
     throw typeof kino !== "undefined" && kino.error ? kino.error("not_found", "Referencia vac\xEDa", { userMessage: "No se encontr\xF3 el contenido solicitado" }) : new Error("Referencia vac\xEDa");
+  }
+  let targetServerName = "";
+  let ref = rawRef;
+  if (rawRef.startsWith("cinejoy-srv:")) {
+    const firstColon = rawRef.indexOf(":");
+    const secondColon = rawRef.indexOf(":", firstColon + 1);
+    if (secondColon > firstColon + 1) {
+      targetServerName = rawRef.slice(firstColon + 1, secondColon).trim();
+      ref = rawRef.slice(secondColon + 1);
+    }
   }
   const parts = ref.split(":");
   const kind = parts[0];
@@ -297,30 +307,44 @@ async function resolve(arg, options = {}) {
   const season = parts[2] || "1";
   const episode = parts[3] || "1";
   const isMovie = kind === "movie";
+  const fetchFn = typeof kino !== "undefined" && kino.fetch ? kino.fetch : globalThis.fetch;
   let mediaTitle = "CineJoy Media";
   let rawTitle = "";
   let yearStr = "";
   let imdbId = null;
-  try {
-    const details = await tmdbFetch(`/${isMovie ? "movie" : "tv"}/${id}`, {
-      append_to_response: "external_ids"
-    });
-    if (details) {
-      mediaTitle = details.title || details.name || "CineJoy Media";
-      rawTitle = details.original_title || details.original_name || details.title || details.name || "";
-      const dateStr = details.release_date || details.first_air_date || "";
-      yearStr = dateStr ? dateStr.slice(0, 4) : "";
-      if (!isMovie) {
-        mediaTitle += ` - T${season}:E${episode}`;
-      }
-      imdbId = details.external_ids?.imdb_id || details.imdb_id || null;
+  let availableServers = [];
+
+  const tmdbPromise = tmdbFetch(`/${isMovie ? "movie" : "tv"}/${id}`, {
+    append_to_response: "external_ids"
+  }).catch(() => null);
+
+  const serversPromise = typeof kino !== "undefined" && kino.crypto && typeof kino.crypto.generateKeyPair === "function"
+    ? fetchFn(WING_SERVERS_URL, {
+        headers: {
+          "Accept": "application/json",
+          "Origin": CINEJOY_ORIGIN,
+          "Referer": CINEJOY_REFERER,
+          "User-Agent": WING_UA
+        },
+        timeoutMs: 4000
+      }).catch(() => null)
+    : Promise.resolve(null);
+
+  const [details, srvRes] = await Promise.all([tmdbPromise, serversPromise]);
+  if (details) {
+    mediaTitle = details.title || details.name || "CineJoy Media";
+    rawTitle = details.original_title || details.original_name || details.title || details.name || "";
+    const dateStr = details.release_date || details.first_air_date || "";
+    yearStr = dateStr ? dateStr.slice(0, 4) : "";
+    if (!isMovie) {
+      mediaTitle += ` - T${season}:E${episode}`;
     }
-  } catch (e) {
+    imdbId = details.external_ids?.imdb_id || details.imdb_id || null;
   }
 
-  const fetchFn = typeof kino !== "undefined" && kino.fetch ? kino.fetch : globalThis.fetch;
   let streams = [];
   const collectedSubtitles = [];
+  const lazyAlternatives = [];
   const seenUrls = /* @__PURE__ */ new Set();
   const seenSubs = /* @__PURE__ */ new Set();
   let resolverHasNoSource = false;
@@ -358,18 +382,8 @@ async function resolve(arg, options = {}) {
 
   // Resolver directo de CineJoy (api2.wing.st lumen-gate-v2)
   if (typeof kino !== "undefined" && kino.crypto && typeof kino.crypto.generateKeyPair === "function") {
-    let availableServers = [];
     try {
-      const srvRes = await fetchFn(WING_SERVERS_URL, {
-        headers: {
-          "Accept": "application/json",
-          "Origin": CINEJOY_ORIGIN,
-          "Referer": CINEJOY_REFERER,
-          "User-Agent": WING_UA
-        },
-        timeoutMs: 4000
-      });
-      if (srvRes.ok) {
+      if (srvRes && srvRes.ok) {
         const srvJson = await srvRes.json();
         const rawList = Array.isArray(srvJson) ? srvJson : srvJson?.servers;
         if (Array.isArray(rawList)) {
@@ -430,10 +444,10 @@ async function resolve(arg, options = {}) {
       let server404Count = 0;
       let serverErrorCount = 0;
 
-      const queryBatch = async (batchNames) => {
+      const queryBatch = async (batchNames, gateTimeoutMs = 8000) => {
         const results = await Promise.allSettled(
           batchNames.map(async (srvName) => {
-            const ans = await queryWingGate(fetchFn, serverPubKey, `/${srvName}/${wingPathSuffix}`, wingPayload);
+            const ans = await queryWingGate(fetchFn, serverPubKey, `/${srvName}/${wingPathSuffix}`, wingPayload, gateTimeoutMs);
             return { srvName, ans };
           })
         );
@@ -491,13 +505,31 @@ async function resolve(arg, options = {}) {
         }
       };
 
-      const firstBatch = orderedServers.slice(0, 4);
-      const secondBatch = orderedServers.slice(4, 8);
-      if (firstBatch.length > 0) {
-        await queryBatch(firstBatch);
-      }
-      if (streams.length < 2 && secondBatch.length > 0) {
-        await queryBatch(secondBatch);
+      if (targetServerName) {
+        await queryBatch([targetServerName], 14000);
+      } else {
+        const wantSlowFirst = preferredServer.toLowerCase() === "polaris";
+        const fastOrdered = wantSlowFirst
+          ? orderedServers
+          : orderedServers.filter((name) => name !== "Polaris");
+        const firstBatch = fastOrdered.slice(0, 5);
+        const remainingServers = orderedServers.filter((name) => !firstBatch.includes(name));
+
+        if (firstBatch.length > 0) {
+          await queryBatch(firstBatch, wantSlowFirst ? 14000 : 6500);
+        }
+        if (remainingServers.length > 0) {
+          if (streams.length === 0) {
+            await queryBatch(remainingServers, 14000);
+          } else {
+            for (const srvName of remainingServers) {
+              lazyAlternatives.push({
+                ref: `cinejoy-srv:${srvName}:${ref}`,
+                label: `CineJoy \xB7 ${srvName}`
+              });
+            }
+          }
+        }
       }
 
       if (!streams.length && server404Count > 0 && serverErrorCount === 0) {
@@ -514,7 +546,7 @@ async function resolve(arg, options = {}) {
   // Integraci\xF3n con scrapers de Nuvio (Kino 0.9.71+, apiVersion 11+)
   const NUVIO_REPO = "NuvioPlugin/All-in-One-Nuvio";
   const MAX_NUVIO_SCRAPERS = 5;
-  if (typeof kino !== "undefined" && typeof kino.nuvio === "object") {
+  if (!targetServerName && typeof kino !== "undefined" && typeof kino.nuvio === "object") {
     try {
       const offered = await kino.nuvio.available({ repo: NUVIO_REPO });
       if (Array.isArray(offered) && offered.length > 0) {
@@ -594,13 +626,14 @@ async function resolve(arg, options = {}) {
   };
   const PROXY_BASE = "https://cinejoyproxy.lenoxlkzsdy.workers.dev";
   const proxyEnabled = options?.hls_proxy !== false && (typeof kino === "undefined" || kino?.settings?.hls_proxy !== false);
+  // Solo enrutar por el Cloudflare Worker los hosts que realmente requieren desempaquetado PNG tsDa
+  // o corrección de MIME y no bloquean IPs de Cloudflare Workers (Polaris, Paris).
+  // Light (lightspeed.st), Sirius (ferb.st) y Nebula (bright67.online) bloquean Cloudflare Workers (404/dontscrape),
+  // pero responden 200 OK directamente desde el dispositivo con Origin + Referer.
   const PROXY_HOSTS = [
-    "lightspeed.st",
-    "ferb.st",
     "vrodaz.com",
     "cursed.st",
     "ttcdn-us.com",
-    "bright67.online",
     "remoteconsultinggroup",
     "highperformancebrands",
     "vaplayer",
@@ -623,7 +656,7 @@ async function resolve(arg, options = {}) {
 
   const primary = streams[0];
   const hasResolverHeaders = streams.some((stream) => Object.keys(stream.headers).length > 0);
-  const alternatives = streams.slice(1, 9).map((stream, idx) => {
+  const resolvedAlternatives = streams.slice(1, 9).map((stream, idx) => {
     const refHdr = stream.headers?.Referer || stream.headers?.referer || "";
     const proxied = shouldProxy(stream.url);
     return {
@@ -633,6 +666,7 @@ async function resolve(arg, options = {}) {
       headers: proxied ? { ...streamHeaders } : { ...streamHeaders, ...stream.headers }
     };
   });
+  const alternatives = [...resolvedAlternatives, ...lazyAlternatives].slice(0, 8);
 
   const subPref = String(options?.lang || (typeof kino !== "undefined" ? kino?.settings?.lang : "") || "es").toLowerCase();
   const formattedSubtitles = subPref === "none"

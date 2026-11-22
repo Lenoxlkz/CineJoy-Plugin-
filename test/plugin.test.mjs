@@ -78,7 +78,7 @@ test('screenEvent handles sendShare and handles provider_missing cleanly', async
   }
 });
 
-test('resolve queries api2.wing.st lumen-gate-v2 via kino.crypto and proxies ExoPlayer-incompatible CDNs', async () => {
+test('resolve queries all servers including Nebula, proxies Polaris/Paris via Worker, and sends Light/Sirius/Nebula directly with Origin+Referer', async () => {
   const plugin = await import(join(root, 'plugin.js'));
   const prevKino = globalThis.kino;
   const crypto = await import('node:crypto');
@@ -144,24 +144,54 @@ test('resolve queries api2.wing.st lumen-gate-v2 via kino.crypto and proxies Exo
         return {
           ok: true,
           status: 200,
-          json: async () => ({ servers: [{ name: 'Light', status: 'ok' }, { name: 'Paris', status: 'ok' }] })
+          json: async () => ({
+            servers: [
+              { name: 'Light', status: 'ok' },
+              { name: 'Nebula', status: 'ok' },
+              { name: 'Sirius', status: 'ok' },
+              { name: 'Polaris', status: 'ok' },
+              { name: 'Paris', status: 'ok' }
+            ]
+          })
         };
       }
       if (url === 'https://api2.wing.st/g') {
         const lastPath = capturedPaths[capturedPaths.length - 1];
-        const bodyObj = lastPath.startsWith('/Light/')
-          ? {
-              data: {
-                stream: [{
-                  type: 'hls',
-                  id: 'primary',
-                  playlist: 'https://lightspeed.st/hls/test/master.m3u8',
-                  captions: [{ type: 'vtt', id: 'es', url: 'https://lightspeed.st/hls/test/es.vtt' }]
-                }]
-              },
-              status: 200
-            }
-          : { data: { error: 'Not Found' }, status: 404 };
+        const map = {
+          '/Polaris/movie': {
+            data: {
+              stream: [{
+                type: 'hls',
+                playlist: 'https://erebus.cursed.st/playlists/movie/550/1080p.m3u8?token=abc',
+                captions: [{ type: 'vtt', id: 'es', url: 'https://erebus.cursed.st/subtitles/movie/550/spanish.vtt?token=abc' }]
+              }]
+            },
+            status: 200
+          },
+          '/Paris/movie': {
+            data: { stream: [{ type: 'hls', playlist: 'https://vro1.vrodaz.com/files/aa/index.m3u8' }] },
+            status: 200
+          },
+          '/Light/movie': {
+            data: {
+              stream: [{
+                type: 'hls',
+                playlist: 'https://lightspeed.st/hls/test/master.m3u8',
+                captions: [{ type: 'vtt', id: 'en', url: 'https://lightspeed.st/hls/test/en.vtt' }]
+              }]
+            },
+            status: 200
+          },
+          '/Sirius/movie': {
+            data: { stream: [{ type: 'hls', playlist: 'https://ru.ferb.st/897300.m3u8' }] },
+            status: 200
+          },
+          '/Nebula/movie': {
+            data: { stream: [{ type: 'hls', playlist: 'https://nebula.bright67.online/hls/test/master.m3u8' }] },
+            status: 200
+          }
+        };
+        const bodyObj = map[lastPath] || { data: { error: 'Not Found' }, status: 404 };
         const iv = Buffer.alloc(12, 0x44);
         const aad = Buffer.concat([Buffer.from('lumen-gate-v2'), Buffer.from([0, 2, 2]), savedEphPub]);
         const c = crypto.createCipheriv('aes-256-gcm', savedResKey, iv);
@@ -179,16 +209,41 @@ test('resolve queries api2.wing.st lumen-gate-v2 via kino.crypto and proxies Exo
   };
 
   try {
-    const out = await plugin.resolve('movie:1561834');
-    assert.ok(capturedPaths.includes('/Light/movie'));
-    assert.ok(capturedPaths.includes('/Paris/movie'));
+    const out = await plugin.resolve('movie:550');
+    for (const srv of ['Light', 'Sirius', 'Nebula', 'Paris']) {
+      assert.ok(capturedPaths.includes(`/${srv}/movie`), `Missing fast query for ${srv}`);
+    }
+    assert.ok(!capturedPaths.includes('/Polaris/movie'), 'Polaris should be deferred as a lazy alternative when fast servers succeed');
+
     assert.equal(out.label, 'CineJoy · Light');
-    assert.match(out.url, /^https:\/\/cinejoyproxy\.lenoxlkzsdy\.workers\.dev\/playlist\.m3u8\?url=https%3A%2F%2Flightspeed\.st%2Fhls%2Ftest%2Fmaster\.m3u8&ref=https%3A%2F%2Fcinejoy\.pk%2F$/);
+    assert.equal(out.url, 'https://lightspeed.st/hls/test/master.m3u8');
+    assert.equal(out.headers.Origin, 'https://cinejoy.pk');
+    assert.equal(out.headers.Referer, 'https://cinejoy.pk/');
+
+    const siriusAlt = out.alternatives.find(a => a.label === 'CineJoy · Sirius');
+    const nebulaAlt = out.alternatives.find(a => a.label === 'CineJoy · Nebula');
+    const parisAlt = out.alternatives.find(a => a.label === 'CineJoy · Paris');
+    const polarisLazy = out.alternatives.find(a => a.label === 'CineJoy · Polaris');
+    assert.ok(siriusAlt && nebulaAlt && parisAlt && polarisLazy, 'Sirius, Nebula, Paris, and Polaris must all appear in alternatives');
+    assert.equal(siriusAlt.url, 'https://ru.ferb.st/897300.m3u8');
+    assert.equal(nebulaAlt.url, 'https://nebula.bright67.online/hls/test/master.m3u8');
+    assert.match(parisAlt.url, /^https:\/\/cinejoyproxy\.lenoxlkzsdy\.workers\.dev\/playlist\.m3u8\?url=https%3A%2F%2Fvro1\.vrodaz\.com/);
+    assert.equal(polarisLazy.ref, 'cinejoy-srv:Polaris:movie:550');
+
     assert.equal(out.subtitles.length, 1);
-    assert.equal(out.subtitles[0].lang, 'es');
-    assert.match(out.subtitles[0].url, /\/sub\.vtt\?url=/);
+    assert.equal(out.subtitles[0].url, 'https://lightspeed.st/hls/test/en.vtt');
+
+    capturedPaths.length = 0;
+    const polarisOut = await plugin.resolve('cinejoy-srv:Polaris:movie:550');
+    assert.deepEqual(capturedPaths, ['/Polaris/movie']);
+    assert.equal(polarisOut.label, 'CineJoy · Polaris');
+    assert.match(polarisOut.url, /^https:\/\/cinejoyproxy\.lenoxlkzsdy\.workers\.dev\/playlist\.m3u8\?url=https%3A%2F%2Ferebus\.cursed\.st/);
+    assert.equal(polarisOut.subtitles.length, 1);
+    assert.equal(polarisOut.subtitles[0].lang, 'es');
+    assert.match(polarisOut.subtitles[0].url, /\/sub\.vtt\?url=https%3A%2F%2Ferebus\.cursed\.st/);
   } finally {
     globalThis.kino = prevKino;
   }
 });
+
 

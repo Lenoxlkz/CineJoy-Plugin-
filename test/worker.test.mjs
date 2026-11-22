@@ -65,6 +65,21 @@ test('rewriteM3u8 rewrites EXT-X-MAP init.png and fMP4 segments as .mp4 and TS s
   );
   assert.match(outTs, /URI="https:\/\/[^"]+\/key\.bin\?url=[^"]+enc\.key/);
   assert.match(outTs, /^https:\/\/[^"]+\/seg\.ts\?url=[^"]+part0\.ts/m);
+
+  const polarisMedia = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:3',
+    '#EXTINF:8.0,',
+    'https://p16-oec-general-useast5.ttcdn-us.com/obj/tos-useast5-i-omjb5zjo8w-tx/786b340c062a4b1bb77fe5bcdcebe482',
+  ].join('\n');
+
+  const outPolaris = rewriteM3u8(
+    polarisMedia,
+    'https://erebus.cursed.st/playlists/movie/550/1080p.m3u8?token=abc',
+    WORKER_ORIGIN,
+    'https://cinejoy.pk/'
+  );
+  assert.match(outPolaris, /^https:\/\/cinejoyproxy\.lenoxlkzsdy\.workers\.dev\/seg\.ts\?url=https%3A%2F%2Fp16-oec-general-useast5\.ttcdn-us\.com/m);
 });
 
 test('sniffMediaMagic detects #EXTM3U with BOM, fMP4 boxes, MPEG-TS, and fake PNG tsDa', () => {
@@ -127,13 +142,64 @@ test('PNG tsDa unwrapper extracts exact TS payload and strips IEND trailer', asy
       });
     };
 
-    const req = new Request(buildProxyUrl(WORKER_ORIGIN, 'https://p16-oec-general-useast5.ttcdn-us.com/seg', 'seg', 'https://cinejoy.pk/'));
+    const req = new Request(buildProxyUrl(WORKER_ORIGIN, 'https://p16-oec-general-useast5.ttcdn-us.com/seg', 'ts', 'https://cinejoy.pk/'));
     const res = await worker.fetch(req);
     assert.equal(res.status, 200);
     assert.equal(res.headers.get('content-type'), 'video/mp2t');
-    assert.equal(res.headers.get('content-length'), null);
+    assert.equal(res.headers.get('accept-ranges'), 'none');
+    assert.equal(res.headers.get('content-length'), String(tsPayload.length));
     const outBytes = Buffer.from(await res.arrayBuffer());
     assert.deepEqual(outBytes, Buffer.from(tsPayload));
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('PNG tsDa Range 206 falls back cleanly to unwrapped 200 without Content-Range mismatch', async () => {
+  const tsPayload = new Uint8Array(376);
+  tsPayload[0] = 0x47;
+  tsPayload[188] = 0x47;
+
+  const pngSig = Buffer.from('89504e470d0a1a0a', 'hex');
+  const ihdr = Buffer.concat([Buffer.from('0000000d', 'hex'), Buffer.from('IHDR'), Buffer.alloc(13 + 4)]);
+  const tsLen = Buffer.alloc(4);
+  tsLen.writeUInt32BE(tsPayload.length, 0);
+  const tsCrc = Buffer.from('e5a78405', 'hex');
+  const iend = Buffer.from('0000000049454e44ae426082', 'hex');
+  const fakePng = Buffer.concat([pngSig, ihdr, tsLen, Buffer.from('tsDa'), Buffer.from(tsPayload), tsCrc, iend]);
+
+  const origFetch = globalThis.fetch;
+  let calls = 0;
+  try {
+    globalThis.fetch = async (_url, init) => {
+      calls++;
+      const hasRange = new Headers(init?.headers).has('Range');
+      if (hasRange) {
+        return new Response(fakePng.subarray(0, 256), {
+          status: 206,
+          headers: {
+            'Content-Type': 'image/png',
+            'Content-Range': `bytes 0-255/${fakePng.length}`,
+            'Content-Length': '256',
+          },
+        });
+      }
+      return new Response(fakePng, {
+        status: 200,
+        headers: { 'Content-Type': 'image/png', 'Content-Length': String(fakePng.length) },
+      });
+    };
+
+    const req = new Request(
+      buildProxyUrl(WORKER_ORIGIN, 'https://p16-oec-general-useast5.ttcdn-us.com/seg', 'ts', 'https://cinejoy.pk/'),
+      { headers: { Range: 'bytes=0-255' } }
+    );
+    const res = await worker.fetch(req);
+    assert.equal(calls, 2);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'video/mp2t');
+    assert.equal(res.headers.get('content-range'), null);
+    assert.deepEqual(Buffer.from(await res.arrayBuffer()), Buffer.from(tsPayload));
   } finally {
     globalThis.fetch = origFetch;
   }

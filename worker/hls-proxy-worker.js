@@ -261,10 +261,10 @@ export function rewriteM3u8(originalText, baseUrl, workerOrigin, refParam = '', 
         hint = 'm3u8';
       } else if (hasMap || lowerPath.endsWith('.mp4') || lowerPath.endsWith('.m4s') || lowerPath.endsWith('.m4v') || lowerPath.endsWith('.m4a')) {
         hint = 'mp4';
-      } else if (lowerPath.endsWith('.ts')) {
-        hint = 'ts';
       } else if (lowerPath.endsWith('.vtt')) {
         hint = 'vtt';
+      } else {
+        hint = 'ts';
       }
 
       expectingVariantPlaylist = false;
@@ -349,6 +349,18 @@ function createPrependAndOptionallyStripPngStream(initialChunk, reader, stripPng
             skippedHeader = true;
           }
 
+          if (chunk.length >= 16) {
+            if (tailHold.length > 0) {
+              controller.enqueue(tailHold);
+            }
+            const emitLen = chunk.length - 16;
+            if (emitLen > 0) {
+              controller.enqueue(chunk.subarray(0, emitLen));
+            }
+            tailHold = chunk.slice(emitLen);
+            return;
+          }
+
           const combined = tailHold.length > 0 ? concatUint8(tailHold, chunk) : chunk;
           if (combined.length <= 16) {
             tailHold = combined;
@@ -356,7 +368,7 @@ function createPrependAndOptionallyStripPngStream(initialChunk, reader, stripPng
           }
           const emitLen = combined.length - 16;
           controller.enqueue(combined.subarray(0, emitLen));
-          tailHold = combined.subarray(emitLen);
+          tailHold = combined.slice(emitLen);
           return;
         }
 
@@ -368,6 +380,19 @@ function createPrependAndOptionallyStripPngStream(initialChunk, reader, stripPng
       return reader.cancel(reason);
     },
   });
+}
+
+function withOptionalFixedLength(stream, expectedLength) {
+  if (
+    typeof FixedLengthStream === 'function' &&
+    Number.isFinite(expectedLength) &&
+    expectedLength > 0
+  ) {
+    const fixed = new FixedLengthStream(expectedLength);
+    stream.pipeTo(fixed.writable).catch(() => {});
+    return fixed.readable;
+  }
+  return stream;
 }
 
 function buildCorsHeaders(baseHeaders) {
@@ -436,23 +461,44 @@ export default {
       });
     }
 
+    const rangeHeader = request.headers.get('Range');
     const forwardHeaders = resolveUpstreamHeaders(
       targetUrl,
       refParam,
       origParam,
-      request.headers.get('Range')
+      rangeHeader
     );
 
-    try {
-      const response = await fetch(targetUrl.toString(), {
-        method: request.method === 'HEAD' ? 'HEAD' : 'GET',
-        headers: forwardHeaders,
-        redirect: 'follow',
-      });
+    const targetPathLower = targetUrl.pathname.toLowerCase();
+    const reqPathLower = reqUrl.pathname.toLowerCase();
+    const isPlaylistReq = reqPathLower.endsWith('.m3u8') || targetPathLower.endsWith('.m3u8') || targetPathLower.endsWith('.m3u');
+    const isSegmentReq =
+      reqPathLower.endsWith('.ts') ||
+      reqPathLower.endsWith('.mp4') ||
+      targetPathLower.endsWith('.ts') ||
+      targetPathLower.endsWith('.mp4') ||
+      targetPathLower.endsWith('.m4s') ||
+      targetUrl.hostname.toLowerCase().includes('ttcdn-us.com');
 
-      const responseHeaders = buildCorsHeaders(response.headers);
-      const targetPathLower = targetUrl.pathname.toLowerCase();
-      const reqPathLower = reqUrl.pathname.toLowerCase();
+    const buildFetchInit = (hdrs, allowCache) => {
+      const init = {
+        method: request.method === 'HEAD' ? 'HEAD' : 'GET',
+        headers: hdrs,
+        redirect: 'follow',
+      };
+      if (allowCache && request.method === 'GET' && !hdrs.has('Range')) {
+        if (isPlaylistReq) {
+          init.cf = { cacheEverything: true, cacheTtl: 60 };
+        } else if (isSegmentReq) {
+          init.cf = { cacheEverything: true, cacheTtl: 3600 };
+        }
+      }
+      return init;
+    };
+
+    try {
+      let response = await fetch(targetUrl.toString(), buildFetchInit(forwardHeaders, !rangeHeader));
+      let responseHeaders = buildCorsHeaders(response.headers);
       const rawContentType = (response.headers.get('content-type') || '').toLowerCase();
 
       if (!response.ok || !response.body || request.method === 'HEAD') {
@@ -497,23 +543,47 @@ export default {
         });
       }
 
-      // Leer hasta 128 bytes iniciales para detectar #EXTM3U, PNG tsDa, fMP4 o MPEG-TS
-      const reader = response.body.getReader();
+      // Leer hasta 192 bytes iniciales para detectar #EXTM3U, PNG tsDa, fMP4 o MPEG-TS
+      let reader = response.body.getReader();
       let headBuf = new Uint8Array(0);
       let eof = false;
 
-      while (headBuf.length < 192) {
-        const { value, done } = await reader.read();
-        if (done) {
-          eof = true;
-          break;
+      const readHead = async () => {
+        headBuf = new Uint8Array(0);
+        eof = false;
+        while (headBuf.length < 192) {
+          const { value, done } = await reader.read();
+          if (done) {
+            eof = true;
+            break;
+          }
+          if (value && value.length > 0) {
+            headBuf = headBuf.length === 0 ? value : concatUint8(headBuf, value);
+          }
         }
-        if (value && value.length > 0) {
-          headBuf = headBuf.length === 0 ? value : concatUint8(headBuf, value);
-        }
-      }
+      };
 
-      const detected = sniffMediaMagic(headBuf, targetPathLower);
+      await readHead();
+      let detected = sniffMediaMagic(headBuf, targetPathLower);
+
+      // Si el cliente envió Range sobre un segmento PNG tsDa y upstream respondió 206,
+      // los offsets no coincidirían con el TS desempaquetado: reintentar como 200 completo.
+      if (response.status === 206 && detected?.kind === 'png-wrapped') {
+        try { await reader.cancel(); } catch {}
+        const fullHeaders = resolveUpstreamHeaders(targetUrl, refParam, origParam, null);
+        response = await fetch(targetUrl.toString(), buildFetchInit(fullHeaders, true));
+        responseHeaders = buildCorsHeaders(response.headers);
+        if (!response.ok || !response.body) {
+          return new Response(response.body, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: responseHeaders,
+          });
+        }
+        reader = response.body.getReader();
+        await readHead();
+        detected = sniffMediaMagic(headBuf, targetPathLower);
+      }
 
       if (detected?.kind === 'm3u8') {
         const chunks = [headBuf];
@@ -551,25 +621,49 @@ export default {
       }
 
       let stripPngOffset = null;
+      let knownOutputLength = null;
+      const hasContentEncoding = Boolean(response.headers.get('content-encoding'));
+      const rawOrigLen = Number.parseInt(response.headers.get('content-length') || '', 10);
+      const validOrigLen = !hasContentEncoding && Number.isFinite(rawOrigLen) && rawOrigLen > 0 ? rawOrigLen : null;
+
       if (detected?.kind === 'png-wrapped') {
         stripPngOffset = detected.payloadOffset;
         responseHeaders.set('Content-Type', detected.mime);
-        responseHeaders.delete('content-length');
+        responseHeaders.set('Accept-Ranges', 'none');
         responseHeaders.delete('content-encoding');
-      } else if (detected?.mime) {
-        responseHeaders.set('Content-Type', detected.mime);
-      } else if (reqPathLower.endsWith('.ts') || targetPathLower.endsWith('.ts')) {
-        responseHeaders.set('Content-Type', 'video/mp2t');
-      } else if (
-        reqPathLower.endsWith('.mp4') ||
-        targetPathLower.endsWith('.mp4') ||
-        targetPathLower.endsWith('.m4s')
-      ) {
-        responseHeaders.set('Content-Type', 'video/mp4');
+        if (
+          response.status === 200 &&
+          validOrigLen !== null &&
+          validOrigLen === detected.payloadOffset + detected.payloadLength + 16
+        ) {
+          knownOutputLength = detected.payloadLength;
+          responseHeaders.set('Content-Length', String(knownOutputLength));
+        } else {
+          responseHeaders.delete('content-length');
+        }
+      } else {
+        if (detected?.mime) {
+          responseHeaders.set('Content-Type', detected.mime);
+        } else if (reqPathLower.endsWith('.ts') || targetPathLower.endsWith('.ts')) {
+          responseHeaders.set('Content-Type', 'video/mp2t');
+        } else if (
+          reqPathLower.endsWith('.mp4') ||
+          targetPathLower.endsWith('.mp4') ||
+          targetPathLower.endsWith('.m4s')
+        ) {
+          responseHeaders.set('Content-Type', 'video/mp4');
+        }
+        if (response.status === 200 && validOrigLen !== null) {
+          knownOutputLength = validOrigLen;
+          responseHeaders.set('Content-Length', String(knownOutputLength));
+        }
       }
 
       if (eof) {
         const finalBytes = stripPngOffset !== null ? unwrapPngBuffer(headBuf) : headBuf;
+        if (response.status === 200) {
+          responseHeaders.set('Content-Length', String(finalBytes.byteLength));
+        }
         return new Response(finalBytes, {
           status: response.status,
           statusText: response.statusText,
@@ -577,7 +671,10 @@ export default {
         });
       }
 
-      const outStream = createPrependAndOptionallyStripPngStream(headBuf, reader, stripPngOffset);
+      const outStream = withOptionalFixedLength(
+        createPrependAndOptionallyStripPngStream(headBuf, reader, stripPngOffset),
+        knownOutputLength
+      );
       return new Response(outStream, {
         status: response.status,
         statusText: response.statusText,
